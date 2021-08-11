@@ -1,5 +1,3 @@
-# Azure-Pipeline-Agent-on-Container-on-GCP-Compute-Engine
-
 # Deploy a Self Hosted Azure Pipeline Agent on a Container
 
 This repository provides an implementation of Self Hosted Azure Pipeline Agent as a container hosted on a GCP Compute Engine Machine.
