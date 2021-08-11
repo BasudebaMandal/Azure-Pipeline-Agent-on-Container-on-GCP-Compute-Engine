@@ -1,0 +1,106 @@
+FROM ubuntu:18.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV DOCKER_CHANNEL=stable
+ENV DOCKER_VERSION=18.06.1-ce
+ENV GCP_CRED_KEY_FILE_ON_HOST=""
+
+## Below three env variables values should match with config.properties
+ENV GCP_CRED_KEY_LOCATION_ON_CONTAINER=""
+ENV GCP_CRED_KEY_FILE_ON_CONTAINER=""
+ENV GCP_CRED_KEY_FILE_PATH_ON_CONTAINER="${GCP_CRED_KEY_LOCATION_ON_CONTAINER}/${GCP_CRED_KEY_FILE_ON_CONTAINER}"
+
+
+## To make it easier for build and release pipelines to run apt-get,
+## configure apt to not require confirmation (assume the -y argument by default)
+RUN echo "APT::Get::Assume-Yes \"true\";" > /etc/apt/apt.conf.d/90assumeyes
+
+## From hereon, bunch of ubuntu packages packages and softwares are getting installed.
+## Softwares are AzureCLI, Google cloud SDK, Docker, Helm, Azure Pipeline Agent, OpenJDK, SOnarQube
+## One key thing to consider is, we must install the Azure Pipeline agent to make this container work as an agent to Azure Pipelines.
+## Softwares/Binaries can be installed as per the need. For example : If this agent is not going to execute any helm command, we need not install helm.
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    dos2unix \
+    wget \
+    unzip \
+    gzip \
+    curl \
+    apt-utils \
+    jq \
+    git \
+    iputils-ping \
+    libcurl4 \
+    libicu60 \
+    libunwind8 \
+    netcat \
+    libssl1.0 \
+    sudo \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN curl -LsS https://aka.ms/InstallAzureCLIDeb | bash \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN echo 'export CLOUDSDK_PYTHON="/usr/bin/python3.6"' >> ~/.bashrc
+
+WORKDIR /azp
+RUN wget https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-sdk.zip && unzip google-cloud-sdk.zip -d /azp/ && rm google-cloud-sdk.zip
+
+ENV PATH $PATH:/azp/google-cloud-sdk/bin
+
+RUN set -ex \
+ && curl -fL "https://download.docker.com/linux/static/${DOCKER_CHANNEL}/`uname -m`/docker-${DOCKER_VERSION}.tgz" -o docker.tgz \
+ && tar --extract --file docker.tgz --strip-components 1 --directory /usr/local/bin \
+ && rm docker.tgz \
+ && docker -v
+
+RUN rm -f /usr/local/bin/helm && \
+   mkdir helm_work && cd helm_work && \
+   wget https://get.helm.sh/helm-v3.1.0-linux-amd64.tar.gz && \
+   gunzip helm-v3.1.0-linux-amd64.tar.gz && \
+   tar -xf helm-v3.1.0-linux-amd64.tar && \
+   cp -f linux-amd64/helm /usr/local/bin/helm
+
+ARG TARGETARCH=amd64
+ARG AGENT_VERSION=AZP_AGENT_VERSION
+
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+      AZP_AGENTPACKAGE_URL=https://vstsagentpackage.azureedge.net/agent/${AGENT_VERSION}/vsts-agent-linux-x64-${AGENT_VERSION}.tar.gz; \
+    else \
+      AZP_AGENTPACKAGE_URL=https://vstsagentpackage.azureedge.net/agent/${AGENT_VERSION}/vsts-agent-linux-${TARGETARCH}-${AGENT_VERSION}.tar.gz; \
+    fi; \
+    curl -LsS "$AZP_AGENTPACKAGE_URL" | tar -xz
+
+RUN \
+  apt-get update && apt-get install -y sudo && \
+  sudo apt-get update && sudo apt-get install -y unzip openjdk-8-jre-headless xvfb libxi6 libgconf-2-4 && \
+  mkdir -p ${GCP_CRED_KEY_LOCATION_ON_CONTAINER}
+
+COPY ${GCP_CRED_KEY_FILE_ON_HOST} ${GCP_CRED_KEY_FILE_PATH_ON_CONTAINER}
+
+RUN apt-get update --quiet && apt-get install --yes --no-install-recommends --no-install-suggests ca-certificates  libssl-dev  libssl-dev  libffi-dev python-dev python3-dev build-essential openssh-client && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /usr/sonar && cd /usr/sonar && wget https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-3.0.3.778-linux.zip && unzip sonar-scanner-cli-3.0.3.778-linux.zip
+
+RUN google-cloud-sdk/install.sh --usage-reporting=true --path-update=true --bash-completion=true --rc-path=/.bashrc --additional-components kubectl alpha beta bigtable
+
+## Set and activate service account inside the container agent service account and Disable updater check for the whole installation.
+RUN google-cloud-sdk/bin/gcloud config set account SERVICE_ACCOUNT 
+RUN google-cloud-sdk/bin/gcloud auth activate-service-account SERVICE_ACCOUNT --key-file=${GCP_CRED_KEY_FILE_PATH_ON_CONTAINER} --project=GCP_PROJECT
+RUN google-cloud-sdk/bin/gcloud config set --installation component_manager/disable_update_check true
+
+RUN \
+  echo ls -la /vsts && mkdir -p /opt/.config && cp -R /root/.config/* /opt/.config && \
+
+
+RUN \
+  apt-get update && apt-get install -y software-properties-common && \
+  sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt-get update && sudo apt-get install python3.6
+
+RUN ["/bin/bash", "-c", "source ~/.bashrc"]
+
+COPY ./start.sh .
+RUN chmod +x start.sh
+
+ENTRYPOINT [ "./start.sh" ]
